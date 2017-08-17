@@ -1,665 +1,87 @@
 <?php
 
 /**
- * Implements hook_permission().
+ * @file
+ * Contains ealert.module.
  */
-function ealert_permission() {
-    return array(
-      'view ealert block' => array(
-        'title' => t('View e-alert block'),
-      ),
-      'administer processing ealert' => array(
-        'title' => t('Processing ealert file'),
-      ),
-      'administer ealert' => array(
-        'description' => t('Access E-Alert Settings'),
-        'title' => t('E-Alert Setting'),
-        'restrict access' => TRUE,
-      ),
-    );
-}
+use Drupal\Core\Routing\RouteMatchInterface;
+use Drupal\node\NodeInterface;
+use Drupal\ealert\EalertUtility;
+use Drupal\taxonomy\Entity\Term;
 
 /**
- * Implements hook_menu().
+ * Implements hook_node_presave().
+ * @param NodeInterface $node
  */
-function ealert_menu() {
-    $items = array();
-    $items['admin/config/content/e-alert'] = array(
-      'title' => 'E-Alert config  block',
-      'page callback' => 'drupal_get_form',
-      'page arguments' => array('ealert_page_form'),
-      'access arguments' => array('administer ealert'),
-      'file' => 'ealert.admin.inc',
-      'description' => 'Setting for ealert file.',
-    );
-    $items['e-alert/process/%'] = array(
-      'title' => 'E-Alert config  block',
-      'page callback' => 'ealert_download_file',
-      'page arguments' => array(2),
-      'access arguments' => array('access content'),
-      'access callback' => 'ealert_check',
-      'type' => MENU_CALLBACK,
-      'description' => 'processing for ealert file.',
-    );
-    return $items;
-}
+function ealert_node_presave(NodeInterface $node) {
+    if ($node->getType() == 'ealert') {
+        $value = $node->body->value;
+        $term_id = \Drupal\taxonomy\Entity\Term::load($node->get('field_outreach')->target_id)->id();
+        $template = \Drupal::config('ealert.adminealertsettings')->get('ealert_' . $term_id);
 
-/**
- * access control
- */
-function ealert_check() {
-    global $user;
-    if ($user->uid) { // user logged in
-        return TRUE;
-    }
-    return FALSE; // anonymous
-}
+        //replace token
+        $token_service = \Drupal::token();
+        $content = $token_service->replace($template, ['node' => $node]);
 
-/**
- * Implement hook_node_delete
- * @param type $node
- */
-function ealert_node_delete($node) {
-    if ($node->type == 'e_alert') {
-        $file_path = ealert_get_ealert_file_path($node);
-        if (file_exists($file_path)) {
-            unlink($file_path);
-        }
-    }
-}
-
-/**
- * Implement hook_node_insert
- * @param type $node
- */
-function ealert_node_insert($node) {
-    if ($node->type == 'e_alert') {
-        if (!ealert_process_page_for_ealert($node)) {
-            watchdog('e-alert', 'Cannot create e-alert file nid: %nid ' .
-                array('%nid' => $node->nid), WATCHDOG_ERROR);
-        }
-    }
-}
-
-/**
- * Implement hook_node_update
- * @param type $node
- */
-function ealert_node_update($node) {
-    if ($node->type == 'e_alert') {
-        if (!isset($node->field_file_e_alert['und'][0]['fid'])) {
-            if (!ealert_process_page_for_ealert($node)) {
-                watchdog('e-alert', 'Cannot create e-alert file nid: %nid ' .
-                    array('%nid' => $node->nid), WATCHDOG_ERROR);
-            }
-        }
-        else {
-            //Sync the content of the e-alert file with the upload file
-            // so that the content of upload file and the content of 
-            // e-alert file should be the same.
-            $file = file_load($node->field_file_e_alert['und'][0]['fid']);
-            $file_upload_path = drupal_realpath($file->uri);
-            $file_upload_content = file_get_contents($file_upload_path);
-
-            // get the path of the e-aler file (E-Alert file name is a unique file name of a e-alert node)
-            $file_path = ealert_get_ealert_file_path($node);
-
-            // Update the content of the e-alert file 
-            if (isset($file_path)) {
-                $fp = fopen($file_path, "wb");
-                fwrite($fp, $file_upload_content);
-                fclose($fp);
-            }
-        }
-    }
-}
-/**
- * Implement hook_node_access
- */
-function ealert_node_access($node, $op, $account) {
-  $type = is_string($node) ? $node : $node->type;
-
-  if ($type == 'e_alert' && $op == 'update' && $node->ready_for_web_unit == '1') {
-        $role = user_role_load_by_name('administrator');
-        if (!user_has_role($role->rid)) {
-            return NODE_ACCESS_DENY;
-        }
-    }
-  // Return the default ignore value if your module doesn't need to get involved in this decision
-  return NODE_ACCESS_IGNORE;
-}
+        // get file path
+        $file_path = EalertUtility::ealert_get_ealert_file_path($node);
 
 
-/**
- * download e-alert file
- */
-function ealert_download_file($nid) {
-    $node = node_load($nid);
-    $file_path = ealert_get_ealert_file_path($node);
-    if (file_exists($file_path)) {
-        // Serve file download.
-        drupal_add_http_header('Pragma', 'public');
-        drupal_add_http_header('Expires', '0');
-        drupal_add_http_header('Cache-Control', 'must-revalidate, post-check=0, pre-check=0');
-        drupal_add_http_header('Content-Type', 'application/vnd.ms-excel');
-        drupal_add_http_header('Content-Disposition', 'attachment; filename=' . basename($file_path) . ';');
-        drupal_add_http_header('Content-Transfer-Encoding', 'binary');
-        drupal_add_http_header('Content-Length', filesize($file_path));
-        readfile($file_path);
-        drupal_exit();
-    }
-}
-
-/**
- * Create file at folder e_alert
- * return @string file_path
- * @param type $nid
- */
-function ealert_process_page_for_ealert($node) {
-    // Get machine name of template taxonomy, and use it for variable_get to 
-    //get header and footer for each template
-    $term = taxonomy_term_load($node->field_template['und'][0]['tid']);
-    $taxonomyMachineName = preg_replace('@[^a-z0-9-]+@', '_', strtolower($term->name));
-
-    if ($node->type == 'e_alert') {
-        $file_path = ealert_get_ealert_file_path($node);
-        // Process header file
-        $title = $node->title;
-        $header = ealert_add_google_code('header', variable_get($taxonomyMachineName . '_header'), $node);
-        $header = ealert_page_title($header, $title);
-        // add preheader
-        $header = ealert_add_preheader($node, $header);
-        // replace title of eblast
-        $header = str_replace('replace_title', $title, $header);
-
-        //Process footer file
-        $footer = ealert_add_google_code('footer', variable_get($taxonomyMachineName . '_footer'), $node);
-        $footer = ealert_add_preheader($node, $footer);
-        $footer = ealert_senate_google_code_replace($node, $footer);
-
-        //Process body
-        $body = '';
-
-        if (isset($node->body['und'][0]['value'])) {
-            $body .= $node->body['und'][0]['value'];
-        }
-        $body = ealert_add_google_code('body', $body, $node);
-
-        //sanitize for content
-        if (variable_get('sanitize')) {
-            $body = ealert_sanitize_content($body);
-            // replace unicode to charset
-            $body = convert_unicode_code_to_charset($body);
-        }
-
-        //replace inline style with attribute for image
-        $body = ealert_replace_inline_style($body);
-
-        // add margin bottom for p tag
-        $body = str_replace('<p', '<p style="margin-bottom:10px; margin-top:10px;" ', $body);
-
-        // replace class="rtecenter" by align="center", so that gmail can render
-        $body = str_replace('class="rtecenter"', 'align="center"', $body);
-
-        //Process content
-        $content = $header . $body . $footer;
         $fp = fopen($file_path, "wb");
         fwrite($fp, $content);
         fclose($fp);
-        return $file_path;
-    }
-    return FALSE;
-}
 
-/**
- * Implement hook_block_info
- * @return type
- */
-function ealert_block_info() {
-    // This example comes from node.module.
-    $blocks['ealert'] = array(
-      'info' => t('Ealert file info'),
-    );
-    return $blocks;
-}
-
-function ealert_block_view($delta = '') {
-    // This example is adapted from node.module.
-    $block = array();
-
-    switch ($delta) {
-        case 'ealert':
-            $block['subject'] = t('E-Alert');
-            $block['content'] = _ealert_page_content();
-            break;
-    }
-    return $block;
-}
-
-/**
- * return content for ealert block
- * @return type
- */
-function _ealert_page_content() {
-    if (arg(0) == 'node') {
-        $nid = arg(1);
-        $node = node_load($nid);
-        if ($node->type == 'e_alert') {
-
-            $preheader = $node->field_preheader['und'][0]['value'];
-            $universe = $node->field_universe['und'][0]['value'];
-            $subject = $node->field_subject_line['und'][0]['value'];
-            $sendDate = date("m/d/Y", strtotime($node->field_send_date['und'][0]['value']));
-
-            $file_url = ealert_get_ealert_file_url($node);
-            $view_file = '<div class="well" style="margin-top: 10px;"><p>' . '<a href="' . $file_url . '" target="_blank">' . 'View E-Alert File' . '</a></p>';
-            $content = $view_file;
-            $content .= '<p><b>Send Date</b>: ' . $sendDate . '</p>';
-            $content .= '<p><b>Universe</b>: ' . $universe . '</p>';
-            $content .= '<p><b>Subject line</b>: ' . $subject . '</p>';
-            $content .= '<p><b>Preheader</b>: ' . $preheader . '</p>';
-            $download = '<p><a href="/e-alert/process/' . $nid . '">Download E-Alert File</a></p>';
-            return array(
-              '#markup' => t($content . $download . '</div>'),
-            );
-        }
     }
 }
 
-/**
- * Replace title for ealert
- * @param type $content
- * @param type $title_replace
- * @return string content
- */
-function ealert_page_title($content, $title_replace) {
-    $res = preg_match("/<title>(.*)<\/title>/siU", $content, $title_matches);
-    // Clean up title: remove EOL's and excessive whitespace.
-    $title_replace = preg_replace('/\s+/', ' ', $title_replace);
-    $title_replace = trim($title_replace);
-    $title_replace = '<title>' . $title_replace . '</title>';
-    if (isset($title_matches[1])) {
-        $content = str_replace('<title>' . $title_matches[1] . '</title>', $title_replace, $content);
+function ealert_node_insert($node) {
+    if ($node->getType() == 'ealert') {
+        $value = $node->body->value;
+        $term_id = \Drupal\taxonomy\Entity\Term::load($node->get('field_outreach')->target_id)->id();
+        $template = \Drupal::config('ealert.adminealertsettings')->get('ealert_' . $term_id);
+
+        //replace token
+        $token_service = \Drupal::token();
+        $content = $token_service->replace($template, ['node' => $node]);
+
+        // get file path
+        $file_path = EalertUtility::ealert_get_ealert_file_path($node);
+        //Process content
+        //$content = $term;
+        $fp = fopen($file_path, "wb");
+        fwrite($fp, $content);
+        fclose($fp);
+
+
+
+        //print($file_path);
+        //die();
     }
-    return $content;
-}
-
-/**
- * add preheader
- */
-function ealert_add_preheader($node, $content) {
-    global $base_url;
-    $replace = '<tr class="click_here">';
-    $replaceDiv = '<div style="display:none;font-size:1px;line-height:1px;max-height:0px;max-width:0px;opacity:0;overflow:hidden;mso-hide:all;font-family: sans-serif;color:ffffff;">';
-    $file_path = ealert_get_ealert_file_path($node);
-    $fileURL = str_replace('/var/www/html', $base_url, $file_path);
-
-    // Replace preheader
-    $preheader = ealert_sanitize_content($node->field_preheader['und'][0]['value']);
-
-    $clickHere = '<tr><td width="100%" colspan="3" align="right" style="font-size:12px; font-family: Arial, Verdana, Helvetica, sans-serif;">'
-        . '<span style="font-size:1px; color:#fff;">'
-        . $preheader . '</span>Problems viewing this E-mail? Please '
-        . '<a href="' . $fileURL . '" target="_blank">click here</a>.</td>';
-    $content = str_replace($replace, $clickHere, $content);
-    //reponsive template
-    $clickHereDiv = $replaceDiv . $preheader;
-
-    $content = str_replace($replaceDiv, $clickHereDiv, $content);
-
-    //responsive replace view as a web page
-    $content = str_replace('#replace_link_web_page', $fileURL, $content);
-    return $content;
-}
-
-/**
- * turn a string to machine reader 
- * @param type $string
- * @return type
- */
-function ealert_xml_to_content_seo_url($string) {
-    //Lower case everything
-    $string = trim(strtolower($string));
-    //Make alphanumeric (removes all other characters)
-    $string = preg_replace("/[^a-z0-9_\s-]/", "", $string);
-    //Clean up multiple dashes or whitespaces
-    $string = preg_replace("/[\s-]+/", " ", $string);
-    //Convert whitespaces and underscore to dash
-    $string = preg_replace("/[\s_]/", "-", $string);
-    return $string;
-}
-
-/**
- * return string google code for ealert block
- * @param type $node
- */
-function ealert_google_code($node) {
-    $title = $node->title;
-    $type = $node->field_e_alert_type['und'][0]['value'];
-    if ($type == 'news-letter') {
-        $type = 'newsletter';
-    }
-    $campaign = 'utm_campaign=' . ealert_xml_to_content_seo_url(variable_get('ealert_member')) .
-        '-' . ealert_xml_to_content_seo_url($title);
-    $source = 'utm_source=' . $type;
-    $google_code = '';
-    $google_code = '?' . $campaign;
-    $google_code .= '&amp;utm_medium=email';
-    $google_code .= '&amp;' . $source;
-    $google_code .= '&amp;utm_content=link';
-
-    return $google_code;
-}
-
-/**
- * Replace google code on content
- * @param type string $content
- * @param type object $node
- * @return string content with google code add to link
- */
-function ealert_add_google_code($part, $content, $node) {
-    // remove &feature=youtu.be in the link
-    $content = str_replace("&amp;feature=youtu.be", "", $content);
-    $title = $node->field_subject_line['und'][0]['value'];
-    $type = $node->field_e_alert_type['und'][0]['value'];
-    if ($type == 'news-letter') {
-        $type = 'newsletter';
-        $e_news = '1';
-    }
-
-    $campaign = 'utm_campaign=' . ealert_xml_to_content_seo_url(variable_get('ealert_member')) .
-        '-' . ealert_xml_to_content_seo_url($title);
-    $source = 'utm_source=' . $type;
-    switch ($part) {
-        case 'header':
-            $source = 'utm_source=' . $type;
-            $google_code = '';
-            $google_code = '?' . $campaign;
-            $google_code .= '&amp;utm_medium=email';
-            $google_code .= '&amp;' . $source;
-            $google_code_link = $google_code . '&amp;utm_content=websiteheader';
-            break;
-        case 'body':
-            $source = 'utm_source=' . $type;
-            $google_code = '';
-            $google_code = '?' . $campaign;
-            $google_code .= '&amp;utm_medium=email';
-            $google_code .= '&amp;' . $source;
-            $google_code_link = $google_code . '&amp;utm_content=link';
-            $google_code_image = $google_code . '&amp;utm_content=image';
-            break;
-        case 'footer':
-            $source = 'utm_source=' . $type;
-            $google_code = '';
-            $google_code = '?' . $campaign;
-            $google_code .= '&amp;utm_medium=email';
-            $google_code .= '&amp;' . $source;
-            $google_code_link = $google_code . '&amp;utm_content=websitefooter';
-            break;
-    }
-
-    //get all links from ealert
-    $links = ealert_get_urls($content);
-    if (isset($links)) {
-        foreach ($links as $link) {
-            $array_url = explode('?utm_campaign=', $link);
-            //remove all old google code
-            $content = str_replace('href="' . $link . '"', 'href="' . $array_url[0] . '"', $content);
-            // add new google code
-            if ($part == 'header' || $part == 'footer') {
-                $content = str_replace('href="' . $array_url[0] . '"', 'href="' . $array_url[0] . $google_code_link . '"', $content);
-            }
-        }
-    }
-    // Special process for body part
-    if ($part == 'body') {
-        //get all links from ealert
-        $regexp = "<a\s[^>]*href=(\"??)([^\" >]*?)\\1[^>]*>(.*)<\/a>";
-        $i = 0;
-        if (preg_match_all("/$regexp/siU", $content, $matches)) {
-            foreach ($matches[0] as $link) {
-                $href = ealert_get_urls($link);
-                // if external link, add dislaimer 
-                $pattern = variable_get('disclaimer_pattern');
-                preg_match($pattern, $href[0], $matches, PREG_OFFSET_CAPTURE);
-                if (!isset($matches[0])) { // external link
-                    $disclaimer_link = variable_get('disclaimer_link');
-                    if (variable_get('add_disclaimer')) {
-                        // no adding disclaimer for mailto link
-                        if (strpos($href[0], 'mailto:') !== false) {
-                            $link_with_disclaimer = str_replace('href="' . $href[0] . '"', 'href="' . $href[0] . '"', $link);
-                        }
-                        else {
-                            $link_with_disclaimer = str_replace('href="' . $href[0] . '"', 'href="' . $disclaimer_link . $href[0] . '"', $link);
-                        }
-                    }
-                    else {
-                        $link_with_disclaimer = str_replace('href="' . $href[0] . '"', 'href="' . $href[0] . '"', $link);
-                    }
-                    $content = str_replace($link, $link_with_disclaimer, $content);
-                }
-                else {// internal link
-                    if (isset($e_news) && $e_news == '1') {
-                        if (strpos($link, '<img') !== false) {
-                            $link_with_google_code = str_replace('href="' . $href[0] . '"', 'href="' . $href[0] . $google_code_image . '#' . $i . '"', $link);
-                            $content = str_replace($link, $link_with_google_code, $content);
-                        }
-                        else {
-                            $link_with_google_code = str_replace('href="' . $href[0] . '"', 'href="' . $href[0] . $google_code_link . '#' . $i . '"', $link);
-                            $content = str_replace_first($link, $link_with_google_code, $content);
-                        }
-                        $i++;
-                    }
-                    else {
-                        if (strpos($link, '<img') !== false) {
-                            $link_with_google_code = str_replace('href="' . $href[0] . '"', 'href="' . $href[0] . $google_code_image . '"', $link);
-                            $content = str_replace($link, $link_with_google_code, $content);
-                        }
-                        else {
-                            $link_with_google_code = str_replace('href="' . $href[0] . '"', 'href="' . $href[0] . $google_code_link . '"', $link);
-                            $content = str_replace($link, $link_with_google_code, $content);
-                        }
-                    }
-                }
-            }
-        }
-    }
-    return $content;
-}
-
-/**
- *
- * @get URLs from string (string maybe a url)
- *
- * @param string $string
-
- * @return array
- *
- */
-function ealert_get_urls($string) {
-    libxml_use_internal_errors(true);
-    $hrefs = array();
-    $dom = new DOMDocument();
-    $dom->loadHTML($string);
-    $tags = $dom->getElementsByTagName('a');
-    foreach ($tags as $tag) {
-        $hrefs[] = $tag->getAttribute('href');
-    }
-    return array_unique($hrefs); // return unique array element
-}
-
-/**
- * sanitize content, remove special chars
- * @param type string $content
- */
-function ealert_sanitize_content($content) {
-    mb_internal_encoding("UTF-8");
-    mb_regex_encoding("UTF-8");
-    //Replace characters
-    $content = mb_ereg_replace('“', '"', $content);
-    $content = mb_ereg_replace('”', '"', $content);
-    $content = mb_ereg_replace('’', "'", $content);
-    $content = htmlentities($content);
-    $content = str_replace('&mdash;', '-', $content);
-    $content = str_replace('&amp;ldquo;', '"', $content);
-    $content = str_replace('&amp;rdquo;', '"', $content);
-    $content = str_replace('&nbsp;', '', $content);
-    $content = str_replace('&amp;lsquo;', "'", $content);
-    $content = str_replace('&amp;rsquo;', "'", $content);
-    $content = str_replace('&ndash;', "-", $content);
-    $content = html_entity_decode($content);
-
-    return $content;
 }
 
 /**
  * Get e-alert file path
- * @param type $nid
+ * @param type $node
  * return string $path
  */
 function ealert_get_ealert_file_path($node) {
-    if ($node->type == 'e_alert') {
-        $district = variable_get('ealert_district');
-        $type = $node->field_e_alert_type['und'][0]['value'];
-        if ($type == 'news-letter') {
-            $type = 'newsletter';
-        }
-        $file_name = date('Ymd', $node->created) . '_SD' . trim($district) . '_' . $type . '_' . $node->nid . '.htm';
-        $dir_name = drupal_realpath('public://') . '/e_alert';
-        if (!is_dir($dir_name)) {
-            mkdir($dir_name, 0755);
-        }
-        $file_path = $dir_name . '/' . $file_name;
-        return $file_path;
+    if ($node->getType() == 'ealert') {
+        
     }
 }
 
 /**
- * Get e-alert file url
- * @param type $nid
- * return string $path
+ * Implements hook_help().
  */
-function ealert_get_ealert_file_url($node) {
-    if ($node->type == 'e_alert') {
-        $district = variable_get('ealert_district');
-        $type = $node->field_e_alert_type['und'][0]['value'];
-        if ($type == 'news-letter') {
-            $type = 'newsletter';
-        }
-        $file_name = date('Ymd', $node->created) . '_SD' . trim($district) . '_' . $type . '_' . $node->nid . '.htm';
-        $file_url = file_create_url('public://' . '/e_alert/' . $file_name);
-        return $file_url;
+function ealert_help($route_name, RouteMatchInterface $route_match) {
+    switch ($route_name) {
+        // Main module help for the ealert module.
+        case 'help.page.ealert':
+            $output = '';
+            $output .= '<h3>' . t('About') . '</h3>';
+            $output .= '<p>' . t('Creating e-alert file for sending email') . '</p>';
+            return $output;
+
+        default:
     }
-}
-
-/**
- * 
- * @param type $content
- * return string $content with replace inline 
- * style with attribute
- */
-function ealert_replace_inline_style($content) {
-    preg_match_all('/<img[^>]+>/i', $content, $images, PREG_PATTERN_ORDER);
-    if (isset($images[0])) {
-        foreach ($images[0] as $image) {
-            //width
-            preg_match('/[^-]width[: ]+([0-9]+)/', $image, $matches);
-            if (isset($matches[1])) {
-                $width = 'width="' . $matches[1] . '"';
-            }
-            //height
-            preg_match('/[^-]height[: ]+([0-9]+)/', $image, $matches);
-            if (isset($matches[1])) {
-                $height = 'height="' . $matches[1] . '"';
-            }
-            // float: right
-            if (isset($image) && (strpos($image, 'float:right;') || strpos($image, 'float: right;')) !== false) {
-                $align = 'align="right"';
-            }
-            // float: right
-            if (isset($image) && strpos($image, 'float:left;') !== false) {
-                $align = 'align="left"';
-            }
-            $atribute = '';
-            if (isset($width) && $width != '') {
-                $atribute .= ' ' . $width . ' ';
-            }
-            if (isset($height) && $height != '') {
-                $atribute .= ' ' . $height . ' ';
-            }
-            if (isset($align) && $align != '') {
-                $atribute .= ' ' . $align . ' ';
-            }
-            // add border of image
-            $atribute .= ' ' . 'border="0"' . ' ';
-            $new_image = substr_replace($image, $atribute, -2, 0);
-            $new_image = preg_replace('/(\<img[^>]+)(style\=\"[^\"]+\")([^>]+)(>)/', '${1}${3}${4}', $new_image);
-            // replace image in content
-            $content = str_replace($image, $new_image, $content);
-            //reset value
-            $align = '';
-            $width = '';
-            $height = '';
-        }
-    }
-    return $content;
-}
-
-/**
- * Replace unicode to charset
- * return string $content
- */
-function convert_unicode_code_to_charset($content) {
-    $unicode_charset = array(
-      '¡' => '&iexcl;',
-      'à' => '&agrave;',
-      'á' => '&aacute;',
-      'â' => '&acirc;',
-      'ã' => '&atilde;',
-      'ä' => '&auml;',
-      'ó' => '&oacute;',
-      'é' => '&eacute;',
-      'ñ' => '&ntilde;',
-      'í' => '&iacute;',
-      'ú' => '&uacute;',
-      'ý' => '&yacute;',
-      'Á' => '&Aacute;',
-      'À' => '&Agrave;',
-      'Â' => '&Acirc;',
-      'Ã' => '&Atilde;',
-      'Ñ' => '&Ntilde;',
-      'Ó' => '&Oacute;',
-      'Ò' => '&Ograve;',
-      'È' => '&Egrave;',
-    );
-    foreach ($unicode_charset as $unicode => $charset) {
-        $content = str_replace($unicode, $charset, $content);
-    }
-    return $content;
-}
-
-/**
- * replace google_analytic for senate located at fooder of ealert file
- */
-function ealert_senate_google_code_replace($node, $content) {
-    $district = variable_get('ealert_district');
-    $type = $node->field_e_alert_type['und'][0]['value'];
-    if ($type == 'news-letter') {
-        $type = 'newsletter';
-    }
-    // replace page title 
-    $pageTitle = ucfirst($type) . '|' . $node->title;
-    $content = str_replace('replace_page_title', $pageTitle, $content);
-
-    // replace page link
-    $fileName = date('Ymd', $node->created) . '_SD' . trim($district) . '_' . $type . '_' . $node->nid . '.htm';
-    $content = str_replace('replace_page_link', $fileName, $content);
-
-    return $content;
-}
-
-function str_replace_first($from, $to, $subject) {
-    $from = '/' . preg_quote($from, '/') . '/';
-
-    return preg_replace($from, $to, $subject, 1);
 }

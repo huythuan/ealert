@@ -1,30 +1,38 @@
 <?php
 
+use Drupal\taxonomy\Entity\Term;
+use Drupal\taxonomy\Entity\Vocabulary;
+
+/**
+ * @file
+ * Install, update and uninstall functions for ealert
+ */
+
 /**
  * Implements hook_install().
  */
 function ealert_install() {
-  $vocabulary = taxonomy_vocabulary_machine_name_load('ealert_outreach_taxonomy');
-  if(!isset($vocabulary->vid)){
-    $t = get_t();
-    $vocaOutreach = (object) array(
-      'name' => $t('Outrech'),
-      'description' => $t('Type of outreach'),
-      'machine_name' => 'ealert_outreach_taxonomy',
-      'help' => '',
-    );
-    $vid = taxonomy_vocabulary_save($vocaOutreach);
-    $vid = $vocaOutreach->vid;
-    
-    $term = new stdClass();
-    $term->name = 'E-Blast';
-    $term->vid = $vid;
-    taxonomy_term_save($term);
-    
-    $term = new stdClass();
-    $term->name = 'E-News';
-    $term->vid = $vid;
-    taxonomy_term_save($term);
-  }
-}
+    $vid = "ealert_outreach_taxonomy";
+    $name = "Outrech";
+    $vocabularies = Vocabulary::loadMultiple();
 
+    if (!isset($vocabularies[$vid])) {
+        $vocabulary = Vocabulary::create(array(
+              'vid' => $vid,
+              'description' => 'Type of outreach',
+              'name' => $name,
+        ));
+        $vocabulary->save();
+
+        $term = Term::create([
+              'name' => 'E-Blast',
+              'vid' => $vid,
+        ]);
+        $term->save();
+        $term = Term::create([
+              'name' => 'E-News',
+              'vid' => $vid,
+        ]);
+        $term->save();
+    }
+}
